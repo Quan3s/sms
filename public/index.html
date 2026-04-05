@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <title>Private Chat</title>
+    <script src="/socket.io/socket.io.js"></script>
+    <style>
+        body { margin: 0; overflow: hidden; background: #111; color: white; font-family: sans-serif; }
+        canvas { position: absolute; top: 0; left: 0; z-index: -1; }
+        #chat-app { position: relative; width: 400px; margin: 50px auto; background: rgba(0,0,0,0.8); padding: 20px; border-radius: 10px; }
+        #messages { height: 300px; overflow-y: auto; margin-bottom: 10px; border: 1px solid #333; padding: 10px; }
+        .input-group { display: flex; gap: 5px; }
+        input[type="text"] { flex: 1; padding: 5px; }
+    </style>
+</head>
+<body>
+    <canvas id="menuCanvas"></canvas>
+    
+    <div id="chat-app">
+        <h3>Cài đặt</h3>
+        <input type="text" id="userId" placeholder="@ID của bạn">
+        <button onclick="saveSettings()">Lưu ID</button>
+        <hr>
+        <div id="messages"></div>
+        <div class="input-group">
+            <button onclick="document.getElementById('file-input').click()">+</button>
+            <input type="file" id="file-input" hidden onchange="uploadFile()">
+            <input type="text" id="msg-input" placeholder="Tin nhắn...">
+            <button onclick="sendMessage('👍')">👍</button>
+            <button onclick="sendMessage()">Gửi</button>
+        </div>
+    </div>
+
+    <script>
+        const socket = io();
+        let myId = localStorage.getItem('chat_userId') || '@anonymous';
+        document.getElementById('userId').value = myId;
+        const currentRoom = 'public_room'; // Mặc định
+
+        socket.emit('join_room', currentRoom);
+
+        function saveSettings() {
+            myId = document.getElementById('userId').value;
+            localStorage.setItem('chat_userId', myId);
+            alert("Đã lưu ID!");
+        }
+
+        function sendMessage(presetMsg = null) {
+            const msg = presetMsg || document.getElementById('msg-input').value;
+            if (!msg) return;
+
+            socket.emit('send_message', {
+                userId: myId,
+                room: currentRoom,
+                message: msg,
+                isFile: false
+            });
+            document.getElementById('msg-input').value = '';
+        }
+
+        async function uploadFile() {
+            const file = document.getElementById('file-input').files[0];
+            if (!file) return;
+            
+            // Validate Client-side
+            if (file.size > 5 * 1024 * 1024) {
+                alert("File vượt quá 5MB!");
+                return;
+            }
+
+            const formData = new FormData();
+            formData.append("file", file);
+
+            const res = await fetch('/upload', { method: 'POST', body: formData });
+            const data = await res.json();
+
+            if (data.link) {
+                socket.emit('send_message', {
+                    userId: myId,
+                    room: currentRoom,
+                    message: `<a href="${data.link}" target="_blank">Tải file: ${data.name} (Chỉ 2 lần)</a>`,
+                    isFile: true
+                });
+            }
+        }
+
+        socket.on('receive_message', (data) => {
+            const msgs = document.getElementById('messages');
+            msgs.innerHTML += `<p><strong>${data.userId}:</strong> ${data.message}</p>`;
+            msgs.scrollTop = msgs.scrollHeight;
+        });
+
+        // Animation Canvas Đơn giản
+        const canvas = document.getElementById('menuCanvas');
+        const ctx = canvas.getContext('2d');
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+        let y = 0;
+
+        function animate() {
+            ctx.fillStyle = 'rgba(17, 17, 17, 0.1)';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            ctx.fillStyle = '#0f0';
+            ctx.fillRect(Math.random() * canvas.width, y, 2, 20);
+            y = (y + 20) % canvas.height;
+            requestAnimationFrame(animate);
+        }
+        animate();
+    </script>
+</body>
+</html>
