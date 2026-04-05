@@ -1,0 +1,134 @@
+* {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+}
+
+body {
+    background-color: #0f0f1a;
+    color: #ffffff;
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    overflow: hidden; /* Ẩn thanh cuộn để Canvas bao phủ toàn màn hình */
+}
+
+/* Background Canvas */
+canvas {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100vw;
+    height: 100vh;
+    z-index: -1;
+}
+
+/* Container chính của Chat */
+#chat-container {
+    position: relative;
+    width: 90%;
+    max-width: 500px;
+    height: 85vh;
+    margin: 5vh auto;
+    background: rgba(20, 20, 35, 0.85);
+    backdrop-filter: blur(10px);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 15px;
+    display: flex;
+    flex-direction: column;
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+    padding: 20px;
+}
+
+/* Phần cài đặt ID */
+.settings-header {
+    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+    padding-bottom: 15px;
+    margin-bottom: 15px;
+}
+
+.settings-header h3 {
+    font-size: 16px;
+    margin-bottom: 10px;
+    color: #00ffcc;
+}
+
+/* Khu vực hiển thị tin nhắn */
+.chat-area {
+    flex: 1;
+    overflow-y: auto;
+    margin-bottom: 15px;
+    padding-right: 5px;
+}
+
+#messages {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.msg-line {
+    background: rgba(255, 255, 255, 0.05);
+    padding: 10px;
+    border-radius: 8px;
+    word-wrap: break-word;
+}
+
+.msg-author {
+    font-weight: bold;
+    color: #00ffcc;
+    margin-right: 5px;
+}
+
+.file-link {
+    color: #ff3366;
+    text-decoration: underline;
+    font-weight: bold;
+}
+
+/* Khu vực nhập liệu */
+.action-area, .input-group {
+    display: flex;
+    gap: 8px;
+}
+
+input[type="text"] {
+    flex: 1;
+    padding: 10px;
+    border-radius: 8px;
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    background: rgba(0, 0, 0, 0.5);
+    color: white;
+    outline: none;
+}
+
+input[type="text"]:focus {
+    border-color: #00ffcc;
+}
+
+button {
+    padding: 10px 15px;
+    border: none;
+    border-radius: 8px;
+    background: #00ffcc;
+    color: #000;
+    font-weight: bold;
+    cursor: pointer;
+    transition: background 0.2s;
+}
+
+button:hover {
+    background: #00ccaa;
+}
+
+#btn-plus, #btn-like {
+    background: rgba(255, 255, 255, 0.1);
+    color: white;
+}
+
+#btn-plus:hover, #btn-like:hover {
+    background: rgba(255, 255, 255, 0.2);
+}
+
+/* Tùy chỉnh thanh cuộn */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.2); border-radius: 10px; }
