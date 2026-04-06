@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Phòng Chat</title>
+    <link rel="stylesheet" href="style.css">
+    <script src="/socket.io/socket.io.js"></script>
+</head>
+<body style="display: flex; flex-direction: column; height: 100vh;">
+    <div class="chat-header">
+        <button class="btn-small btn-outline" onclick="window.history.back()">🔙 Quay lại</button>
+        <span id="room-name">Đang kết nối...</span>
+    </div>
+    
+    <div id="messages" class="chat-messages"></div>
+    
+    <div class="chat-input-area">
+        <input type="text" id="msg-input" placeholder="Nhập tin nhắn...">
+        <button onclick="sendMessage()">Gửi</button>
+    </div>
+
+    <script src="chat.js"></script>
+</body>
+</html>
