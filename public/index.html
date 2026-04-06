@@ -1,39 +1,38 @@
 <!DOCTYPE html>
-<html lang="vi">
+<html>
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Secure Chat Box</title>
+    <title>SQL Chat Pro</title>
     <link rel="stylesheet" href="style.css">
     <script src="/socket.io/socket.io.js"></script>
 </head>
 <body>
     <canvas id="menuCanvas"></canvas>
     
-    <div id="chat-container">
-        <div class="settings-header">
-            <h3>Cài đặt định danh</h3>
-            <div class="input-group">
-                <input type="text" id="userId" placeholder="Nhập @ID của bạn...">
-                <button id="btn-save-id">Lưu ID</button>
-            </div>
-        </div>
-        
-        <div class="chat-area">
-            <div id="messages"></div>
-        </div>
-
-        <div class="action-area">
-            <button id="btn-plus" title="Đính kèm tệp">+</button>
-            <input type="file" id="file-input" hidden>
-            
-            <input type="text" id="msg-input" placeholder="Nhập tin nhắn (hỗ trợ ký tự đặc biệt)...">
-            
-            <button id="btn-like">👍</button>
-            <button id="btn-send">Gửi</button>
-        </div>
+    <div id="auth-box">
+        <h2>Đăng nhập / Đăng ký</h2>
+        <input type="text" id="user-id" placeholder="@ID">
+        <input type="password" id="pass" placeholder="Mật khẩu (8-15 số)">
+        <button onclick="auth('login')">Vào Chat</button>
+        <button onclick="auth('register')">Đăng ký</button>
     </div>
 
+    <div id="chat-app" style="display:none;">
+        <div class="sidebar">
+            <div id="my-id-display"></div>
+            <input type="text" id="friend-id" placeholder="ID bạn bè...">
+            <button onclick="addFriend()">Kết bạn</button>
+            <div id="friend-list"></div>
+        </div>
+        <div class="main-chat">
+            <div id="chat-target">Chọn người để nhắn</div>
+            <div id="messages"></div>
+            <div class="input-row">
+                <button>+</button>
+                <input type="text" id="msg-input">
+                <button onclick="send()">Gửi</button>
+            </div>
+        </div>
+    </div>
     <script src="script.js"></script>
 </body>
 </html>
