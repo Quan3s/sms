@@ -1,105 +1,71 @@
-const socket = io();
-let myId = "";
-let currentPartner = "";
+const token = localStorage.getItem('jwt_token');
 
-// --- CANVAS MENU ANIMATION ---
-const canvas = document.getElementById('menuCanvas');
-const ctx = canvas.getContext('2d');
-let dots = [];
+// Vẽ Canvas cho đẹp
+const ctx = document.getElementById('menuCanvas').getContext('2d');
+// (Bạn có thể tái sử dụng hàm vẽ Canvas ở code cũ vào đây)
 
-function initCanvas() {
-    canvas.width = window.innerWidth;
-    canvas.height = window.innerHeight;
-    for(let i=0; i<40; i++) {
-        dots.push({
-            x: Math.random() * canvas.width,
-            y: Math.random() * canvas.height,
-            size: Math.random() * 2 + 1,
-            speed: Math.random() * 0.5 + 0.2
-        });
-    }
+// Kiểm tra Session khi mở web
+if (token) {
+    document.getElementById('auth-box').style.display = 'none';
+    document.getElementById('app-container').style.display = 'flex';
+    document.getElementById('my-name').innerText = localStorage.getItem('user_name');
+    document.getElementById('my-num-id').innerText = localStorage.getItem('user_num_id');
 }
 
-function animate() {
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    ctx.fillStyle = "rgba(0, 255, 204, 0.5)";
-    dots.forEach(d => {
-        ctx.beginPath();
-        ctx.arc(d.x, d.y, d.size, 0, Math.PI*2);
-        ctx.fill();
-        d.y -= d.speed;
-        if(d.y < 0) d.y = canvas.height;
+// Chuyển UI Đăng nhập/Đăng ký
+function showRegister() { document.getElementById('auth-box').style.display = 'none'; document.getElementById('reg-box').style.display = 'block'; }
+function showLogin() { document.getElementById('reg-box').style.display = 'none'; document.getElementById('auth-box').style.display = 'block'; }
+
+// API Đăng nhập
+async function login() {
+    const res = await fetch('/api/login', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ username: document.getElementById('username').value, password: document.getElementById('password').value })
     });
-    requestAnimationFrame(animate);
-}
-
-initCanvas();
-animate();
-
-// --- AUTH LOGIC (SQL) ---
-async function auth(type) {
-    const userId = document.getElementById('user-id').value;
-    const password = document.getElementById('pass').value;
-
-    if(!userId || !password) return alert("Vui lòng nhập đủ!");
-
-    const res = await fetch(`/${type}`, {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ userId, password })
-    });
-
     const data = await res.json();
     if(data.success) {
-        if(type === 'register') return alert("Đăng ký xong, hãy đăng nhập!");
-        myId = userId;
-        document.getElementById('auth-box').style.display = 'none';
-        document.getElementById('chat-app').style.display = 'flex';
-        document.getElementById('my-id-display').innerText = `Tôi: ${myId}`;
-        socket.emit('auth', myId);
-    } else {
-        alert(data.error);
-    }
+        localStorage.setItem('jwt_token', data.token);
+        localStorage.setItem('user_name', data.user.name);
+        localStorage.setItem('user_num_id', data.user.numId);
+        location.reload();
+    } else alert(data.error);
 }
 
-// --- CHAT LOGIC ---
-function addFriend() {
-    const friendId = document.getElementById('friend-id').value;
-    if(!friendId || friendId === myId) return;
-    
-    // Giả lập thêm vào danh sách hiển thị
-    const list = document.getElementById('friend-list');
-    const div = document.createElement('div');
-    div.className = 'friend-item';
-    div.innerText = friendId;
-    div.onclick = () => selectPartner(friendId, div);
-    list.appendChild(div);
-}
-
-function selectPartner(id, el) {
-    currentPartner = id;
-    document.getElementById('chat-target').innerText = `Đang chat với: ${id}`;
-    document.querySelectorAll('.friend-item').forEach(i => i.classList.remove('active'));
+// Chuyển Tab Mobile
+function switchTab(tabId, el) {
+    document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+    document.getElementById('tab-' + tabId).classList.add('active');
     el.classList.add('active');
-    document.getElementById('messages').innerHTML = ""; // Xóa màn hình chat cũ
 }
 
-function send() {
-    const msg = document.getElementById('msg-input').value;
-    if(!msg || !currentPartner) return;
-
-    socket.emit('send_private', { to: currentPartner, msg });
-    document.getElementById('msg-input').value = "";
+// Tìm kiếm bạn bè
+async function searchUser() {
+    const q = document.getElementById('searchInput').value;
+    const res = await fetch(`/api/search?q=${q}`, { headers: { 'Authorization': `Bearer ${token}` } });
+    if(res.status === 401 || res.status === 403) return logout();
+    
+    const users = await res.json();
+    const box = document.getElementById('search-results');
+    box.innerHTML = users.map(u => `
+        <div class="user-item">
+            <div>
+                <strong>${u.display_name}</strong><br>
+                <small>ID Số: ${u.numeric_id}</small>
+            </div>
+            <button class="btn-small" onclick="goToChat(${u.id})">Nhắn tin</button>
+        </div>
+    `).join('');
 }
 
-socket.on('new_msg', (data) => {
-    // Chỉ hiển thị nếu tin nhắn đó thuộc về cặp hội thoại đang mở
-    if(data.sender === currentPartner || data.sender === myId) {
-        const box = document.getElementById('messages');
-        const div = document.createElement('div');
-        div.className = `msg-row ${data.sender === myId ? 'msg-right' : 'msg-left'}`;
-        div.innerText = data.content;
-        box.appendChild(div);
-        box.scrollTop = box.scrollHeight;
-    }
-});
+// Chuyển hướng sang trang CHAT riêng
+async function goToChat(targetId) {
+    const res = await fetch('/api/get-chat-link', {
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify({ targetId, type: 'private' })
+    });
+    const data = await res.json();
+    if(data.link) window.location.href = data.link; // Redirect sang link ngẫu nhiên
+}
+
+function logout() { localStorage.clear(); location.reload(); }
