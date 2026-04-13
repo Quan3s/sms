@@ -7,285 +7,317 @@ const { Pool } = require('pg');
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server);
+const io = new Server(server, { cors: { origin: "*" } });
 
-const JWT_SECRET = 'Z_CHAT_SUPER_SECRET_TOKEN';
+const JWT_SECRET = process.env.JWT_SECRET || 'Z_INFINITY_SECRET_KEY_2024';
 const PORT = process.env.PORT || 3000;
 
-// 1. KẾT NỐI DATABASE (Sử dụng DATABASE_URL từ server deploy)
+// 1. DATABASE SETUP
 const pool = new Pool({
     connectionString: process.env.DATABASE_URL || 'postgresql://postgres:password@localhost:5432/zchat',
-    ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false // Hỗ trợ SSL cho Render/Heroku
+    ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false
 });
 
-// Tự động tạo bảng nếu chưa có (Tránh lỗi Runtime)
 const initDB = async () => {
     try {
         await pool.query(`
             CREATE TABLE IF NOT EXISTS users (
                 id SERIAL PRIMARY KEY,
                 username TEXT UNIQUE NOT NULL,
-                display_name TEXT,
+                display_name TEXT NOT NULL,
                 password TEXT NOT NULL,
-                num_id TEXT UNIQUE
+                num_id TEXT UNIQUE NOT NULL,
+                avatar_color TEXT DEFAULT '#22d3ee',
+                is_online BOOLEAN DEFAULT FALSE,
+                last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
             CREATE TABLE IF NOT EXISTS messages (
                 id SERIAL PRIMARY KEY,
-                room_id TEXT,
+                room_id TEXT NOT NULL,
+                sender_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
                 sender_name TEXT,
-                content TEXT,
+                content TEXT NOT NULL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
+            CREATE INDEX IF NOT EXISTS idx_room ON messages(room_id);
         `);
-        console.log("Database đã sẵn sàng.");
-    } catch (err) {
-        console.error("Lỗi khởi tạo DB:", err);
-    }
+        console.log("✅ Database Ready!");
+    } catch (e) { console.error(e); }
 };
 initDB();
 
 app.use(express.json());
 
-// --- API HỆ THỐNG ---
-
-app.post('/api/register', async (req, res) => {
+// 2. API ROUTES
+app.post('/api/auth/register', async (req, res) => {
     const { username, display_name, password } = req.body;
     try {
         const hashed = await bcrypt.hash(password, 10);
-        const numId = Math.floor(100000 + Math.random() * 900000).toString();
+        const numId = Math.floor(100000 + Math.random() * 899999).toString();
         await pool.query(
             'INSERT INTO users (username, display_name, password, num_id) VALUES ($1, $2, $3, $4)',
             [username, display_name, hashed, numId]
         );
         res.json({ success: true });
-    } catch (e) { res.status(500).json({ error: "Lỗi! Tên đăng nhập có thể đã tồn tại." }); }
+    } catch (e) { res.status(400).json({ error: "Tên đăng nhập đã tồn tại!" }); }
 });
 
-app.post('/api/login', async (req, res) => {
+app.post('/api/auth/login', async (req, res) => {
     const { username, password } = req.body;
-    try {
-        const result = await pool.query('SELECT * FROM users WHERE username = $1', [username]);
-        const user = result.rows[0];
-        if (user && await bcrypt.compare(password, user.password)) {
-            const token = jwt.sign({ id: user.id }, JWT_SECRET);
-            res.json({ success: true, token, user: { name: user.display_name, num_id: user.num_id } });
-        } else res.status(401).json({ error: "Sai tài khoản hoặc mật khẩu!" });
-    } catch (e) { res.status(500).json({ error: "Lỗi Server" }); }
+    const r = await pool.query('SELECT * FROM users WHERE username = $1', [username]);
+    const u = r.rows[0];
+    if (u && await bcrypt.compare(password, u.password)) {
+        const token = jwt.sign({ id: u.id }, JWT_SECRET);
+        res.json({ success: true, token, user: { id: u.id, name: u.display_name, num_id: u.num_id, color: u.avatar_color } });
+    } else res.status(401).json({ error: "Sai thông tin!" });
+});
+
+app.get('/api/search', async (req, res) => {
+    const r = await pool.query('SELECT num_id, display_name, avatar_color, is_online FROM users WHERE num_id = $1 OR display_name ILIKE $2 LIMIT 10', [req.query.q, `%${req.query.q}%`]);
+    res.json(r.rows);
 });
 
 app.get('/api/history/:room', async (req, res) => {
-    const history = await pool.query('SELECT * FROM messages WHERE room_id = $1 ORDER BY created_at ASC LIMIT 50', [req.params.room]);
-    res.json(history.rows);
+    const r = await pool.query('SELECT m.*, u.avatar_color FROM messages m JOIN users u ON m.sender_id = u.id WHERE m.room_id = $1 ORDER BY m.created_at ASC LIMIT 100', [req.params.room]);
+    res.json(r.rows);
 });
 
-// --- PHẦN GIAO DIỆN (HTML/CSS/JS GỘP) ---
-
+// 3. FRONTEND UI
 app.get('/', (req, res) => {
     res.send(`
 <!DOCTYPE html>
 <html lang="vi">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
-    <title>Z-Chat Ultra</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+    <title>Z-Chat Infinity</title>
     <script src="/socket.io/socket.io.js"></script>
     <style>
-        :root { --primary: #00d2ff; --bg: #0a0a12; --glass: rgba(255, 255, 255, 0.05); }
-        * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Segoe UI', sans-serif; }
-        body { background: var(--bg); color: white; height: 100vh; overflow: hidden; }
+        :root { --p: #00f2fe; --s: #4facfe; --bg: #0a0f1e; --card: #161b2e; }
+        * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Inter', -apple-system, sans-serif; }
+        body { background: var(--bg); color: #fff; height: 100vh; overflow: hidden; }
+        .btn { background: linear-gradient(135deg, var(--p), var(--s)); color: #000; border: none; padding: 14px; border-radius: 12px; font-weight: 700; cursor: pointer; transition: 0.2s; }
+        input { background: #1e253c; border: 1px solid #2d3655; color: white; padding: 14px; border-radius: 12px; width: 100%; margin-bottom: 12px; outline: none; }
+        input:focus { border-color: var(--p); }
+
+        .screen { display: none; height: 100vh; flex-direction: column; }
+        .active { display: flex; }
+
+        /* UI Chat */
+        .header { height: 60px; padding: 0 15px; display: flex; align-items: center; justify-content: space-between; background: rgba(22, 27, 46, 0.9); border-bottom: 1px solid #2d3655; backdrop-filter: blur(10px); }
+        .msg-list { flex: 1; overflow-y: auto; padding: 15px; display: flex; flex-direction: column; gap: 12px; background-image: radial-gradient(#1e253c 1px, transparent 1px); background-size: 20px 20px; }
+        .bubble { max-width: 80%; padding: 10px 14px; border-radius: 18px; font-size: 15px; line-height: 1.4; word-wrap: break-word; }
+        .me { align-self: flex-end; background: var(--s); color: #000; border-bottom-right-radius: 2px; }
+        .other { align-self: flex-start; background: var(--card); border-bottom-left-radius: 2px; }
+        .img-msg { max-width: 100%; border-radius: 10px; margin-top: 5px; }
+
+        .item { background: var(--card); padding: 15px; border-radius: 16px; margin: 10px 15px; display: flex; align-items: center; gap: 12px; cursor: pointer; transition: 0.2s; border: 1px solid transparent; }
+        .item:active { background: #232a45; }
+        .dot { width: 12px; height: 12px; border-radius: 50%; border: 2px solid var(--bg); position: absolute; bottom: 0; right: 0; background: #94a3b8; }
+        .dot.on { background: #22c55e; box-shadow: 0 0 10px #22c55e; }
+        .avt { width: 48px; height: 48px; border-radius: 14px; display: flex; align-items: center; justify-content: center; font-weight: 800; color: #000; position: relative; flex-shrink: 0; }
         
-        .btn { background: var(--primary); color: #000; border: none; padding: 12px; border-radius: 10px; font-weight: bold; cursor: pointer; transition: 0.3s; }
-        .btn:active { transform: scale(0.95); }
-        input { background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.2); color: white; padding: 12px; border-radius: 10px; outline: none; margin-bottom: 15px; width: 100%; }
-        input:focus { border-color: var(--primary); }
-
-        /* Auth */
-        #auth-screen { display: flex; align-items: center; justify-content: center; height: 100vh; padding: 20px; }
-        .card { background: var(--glass); backdrop-filter: blur(20px); padding: 30px; border-radius: 25px; width: 100%; max-width: 400px; border: 1px solid rgba(255,255,255,0.1); text-align: center; }
-
-        /* App */
-        #app-screen { display: none; flex-direction: column; height: 100vh; }
-        .header { height: 60px; padding: 0 20px; display: flex; align-items: center; justify-content: space-between; background: rgba(255,255,255,0.03); border-bottom: 1px solid rgba(255,255,255,0.1); }
-        .main-view { flex: 1; overflow-y: auto; padding: 20px; }
-
-        /* Chat Room */
-        #chat-view { display: none; position: fixed; inset: 0; background: var(--bg); flex-direction: column; z-index: 1000; }
-        .msgs { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 12px; }
-        .m { max-width: 80%; padding: 10px 15px; border-radius: 15px; font-size: 15px; line-height: 1.4; }
-        .m-me { align-self: flex-end; background: var(--primary); color: #000; border-bottom-right-radius: 2px; }
-        .m-other { align-self: flex-start; background: rgba(255,255,255,0.1); border-bottom-left-radius: 2px; }
-
-        .input-bar { padding: 15px; display: flex; gap: 10px; background: #161625; padding-bottom: calc(15px + env(safe-area-inset-bottom)); }
-        .input-bar input { margin: 0; }
-
-        /* Navigation */
-        .bottom-nav { height: 70px; display: flex; background: #000; border-top: 1px solid #333; padding-bottom: env(safe-area-inset-bottom); }
-        .nav-item { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; font-size: 11px; opacity: 0.5; cursor: pointer; }
-        .nav-item.active { opacity: 1; color: var(--primary); }
+        .nav { height: 75px; display: flex; background: #070b16; border-top: 1px solid #2d3655; padding-bottom: env(safe-area-inset-bottom); }
+        .tab { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; font-size: 11px; opacity: 0.4; transition: 0.3s; }
+        .tab.on { opacity: 1; color: var(--p); }
+        .input-bar { padding: 10px 15px; background: #161b2e; display: flex; gap: 10px; padding-bottom: calc(10px + env(safe-area-inset-bottom)); }
+        .input-bar input { margin: 0; border-radius: 25px; }
     </style>
 </head>
 <body>
-    <div id="auth-screen">
-        <div class="card" id="login-box">
-            <h1 style="color:var(--primary); margin-bottom:10px">Z-Chat</h1>
-            <p style="opacity:0.6; margin-bottom:20px">Đăng nhập để kết nối</p>
-            <input type="text" id="u" placeholder="Tên đăng nhập">
-            <input type="password" id="p" placeholder="Mật khẩu">
-            <button class="btn" style="width:100%" onclick="auth('login')">Đăng Nhập</button>
-            <p style="margin-top:20px; font-size:13px" onclick="toggleAuth(true)">Chưa có tài khoản? Đăng ký ngay</p>
-        </div>
-        <div class="card" id="reg-box" style="display:none">
-            <h2>Tạo tài khoản</h2><br>
-            <input type="text" id="ru" placeholder="Username">
-            <input type="text" id="rn" placeholder="Tên hiển thị">
-            <input type="password" id="rp" placeholder="Mật khẩu">
-            <button class="btn" style="width:100%" onclick="auth('reg')">Xác Nhận</button>
-            <p style="margin-top:20px; font-size:13px" onclick="toggleAuth(false)">Quay lại Đăng nhập</p>
+    <!-- AUTH SCREEN -->
+    <div id="auth" class="screen active" style="justify-content:center; padding:30px;">
+        <div style="background:var(--card); padding:35px; border-radius:30px; border:1px solid #2d3655; text-align:center; box-shadow: 0 20px 50px rgba(0,0,0,0.5);">
+            <h1 style="color:var(--p); font-size:40px; margin-bottom:10px; letter-spacing:-1px">Z-CHAT</h1>
+            <p style="opacity:0.5; margin-bottom:30px">Infinity Edition V7</p>
+            <div id="l-box">
+                <input id="u" placeholder="Tên đăng nhập">
+                <input id="p" type="password" placeholder="Mật khẩu">
+                <button class="btn" style="width:100%" onclick="auth('login')">Đăng Nhập</button>
+                <p style="margin-top:20px; font-size:14px; opacity:0.6" onclick="toggleA(1)">Chưa có tài khoản? <b>Đăng ký</b></p>
+            </div>
+            <div id="r-box" style="display:none">
+                <input id="ru" placeholder="Username">
+                <input id="rn" placeholder="Tên hiển thị">
+                <input id="rp" type="password" placeholder="Mật khẩu">
+                <button class="btn" style="width:100%" onclick="auth('register')">Đăng Ký</button>
+                <p style="margin-top:20px; font-size:14px; opacity:0.6" onclick="toggleA(0)">Quay lại <b>Đăng nhập</b></p>
+            </div>
         </div>
     </div>
 
-    <div id="app-screen">
+    <!-- MAIN APP -->
+    <div id="app" class="screen">
         <div class="header">
-            <span id="my-name" style="font-weight:bold">Z-Chat</span>
-            <span id="my-id" style="color:var(--primary); font-size:12px; border:1px solid; padding:2px 8px; border-radius:10px"></span>
-        </div>
-        <div class="main-view" id="main-view">
-            <div id="tab-home">
-                <div class="card" style="width:100%; text-align:left; padding:20px; margin-bottom:15px" onclick="joinChat('global')">
-                    <h3 style="color:var(--primary)">🌍 Phòng Toàn Cầu</h3>
-                    <p style="font-size:12px; opacity:0.6">Nơi mọi người trò chuyện tự do</p>
-                </div>
-            </div>
-            <div id="tab-search" style="display:none">
-                <input type="text" id="s-input" placeholder="Tìm ID số hoặc tên...">
-                <div id="s-results"></div>
+            <b style="font-size:20px">Z-CHAT</b>
+            <div id="my-chip" style="background:#2d3655; padding:6px 15px; border-radius:20px; font-size:12px; display:flex; gap:8px">
+                <span id="mn"></span> <span style="color:var(--p)" id="mi"></span>
             </div>
         </div>
-        <div class="bottom-nav">
-            <div class="nav-item active" onclick="tab('home',this)">🏠<br>Trang chủ</div>
-            <div class="nav-item" onclick="tab('search',this)">🔍<br>Tìm kiếm</div>
-            <div class="nav-item" onclick="logout()">🚪<br>Thoát</div>
+        <div id="tab-h" style="flex:1; overflow-y:auto;">
+            <div class="item" onclick="go('global','Cộng Đồng')">
+                <div class="avt" style="background:var(--p)">🌍</div>
+                <div style="flex:1"><b>Phòng Toàn Cầu</b><br><small style="opacity:0.5">Mọi người cùng chat...</small></div>
+            </div>
+            <div style="padding:15px 20px 5px; font-size:12px; opacity:0.4; font-weight:bold">HỘI THOẠI</div>
+            <div id="recent"></div>
+        </div>
+        <div id="tab-s" style="flex:1; display:none; padding:15px;">
+            <input id="sq" placeholder="Tìm ID số hoặc Tên..." oninput="search()">
+            <div id="sr"></div>
+        </div>
+        <div class="nav">
+            <div class="tab on" id="nh" onclick="tab('h')">💬<br>Trò chuyện</div>
+            <div class="tab" id="ns" onclick="tab('s')">🔍<br>Tìm kiếm</div>
+            <div class="tab" onclick="logout()">🚪<br>Thoát</div>
         </div>
     </div>
 
-    <div id="chat-view">
+    <!-- CHAT VIEW -->
+    <div id="chat" class="screen" style="position:fixed; inset:0; z-index:1000; background:var(--bg)">
         <div class="header">
-            <button onclick="leaveChat()" style="background:none; border:none; color:white; font-size:22px">←</button>
-            <span id="room-name">Phòng Chat</span>
-            <div style="width:30px"></div>
+            <button onclick="back()" style="background:none; border:none; color:white; font-size:24px">✕</button>
+            <b id="ct"></b>
+            <div id="online-st" style="width:10px; height:10px; border-radius:50%; background:#94a3b8"></div>
         </div>
-        <div class="msgs" id="msgs"></div>
-        <div id="typing" style="padding:5px 20px; font-size:11px; color:var(--primary); height:20px"></div>
+        <div class="msg-list" id="ml"></div>
+        <div id="ty" style="padding:5px 20px; font-size:11px; color:var(--p); height:20px"></div>
         <div class="input-bar">
-            <input type="text" id="m" placeholder="Nhập tin nhắn..." oninput="isTyping()">
-            <button class="btn" onclick="send()">Gửi</button>
+            <input id="mi-input" placeholder="Nhập tin nhắn..." autocomplete="off" oninput="isT()">
+            <button class="btn" style="padding:0 20px" onclick="send()">Gửi</button>
         </div>
     </div>
 
     <script>
         const socket = io();
-        let me = JSON.parse(localStorage.getItem('z_user'));
-        let currentRoom = '';
-        let tT;
+        let me = JSON.parse(localStorage.getItem('z_infinity_user'));
+        let cr = '';
 
-        if(me) showApp();
+        if(me) start();
 
-        function toggleAuth(reg) {
-            document.getElementById('login-box').style.display = reg ? 'none' : 'block';
-            document.getElementById('reg-box').style.display = reg ? 'block' : 'none';
+        function toggleA(r){ document.getElementById('l-box').style.display=r?'none':'block'; document.getElementById('r-box').style.display=r?'block':'none'; }
+
+        async function auth(t){
+            const l=t==='login';
+            const b = l ? {username:u.value, password:p.value} : {username:ru.value, display_name:rn.value, password:rp.value};
+            const res = await fetch('/api/auth/'+t, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(b)});
+            const d = await res.json();
+            if(d.success){
+                if(l){ localStorage.setItem('z_infinity_user', JSON.stringify(d.user)); me=d.user; start(); }
+                else { alert("Xong! Đăng nhập đi bạn"); toggleA(0); }
+            } else alert(d.error);
         }
 
-        async function auth(type) {
-            const isL = type==='login';
-            const body = isL ? {username:u.value, password:p.value} : {username:ru.value, display_name:rn.value, password:rp.value};
-            const res = await fetch('/api/'+(isL?'login':'register'), {
-                method:'POST', headers:{'Content-Type':'application/json'},
-                body: JSON.stringify(body)
-            });
-            const data = await res.json();
-            if(data.success) {
-                if(isL) {
-                    localStorage.setItem('z_user', JSON.stringify(data.user));
-                    me = data.user;
-                    showApp();
-                } else { alert("Đã đăng ký! Mời đăng nhập"); toggleAuth(false); }
-            } else alert(data.error);
+        function start(){
+            document.getElementById('auth').classList.remove('active');
+            document.getElementById('app').classList.add('active');
+            document.getElementById('mn').innerText = me.name;
+            document.getElementById('mi').innerText = "#"+me.num_id;
+            socket.emit('online', me.id);
         }
 
-        function showApp() {
-            document.getElementById('auth-screen').style.display = 'none';
-            document.getElementById('app-screen').style.display = 'flex';
-            document.getElementById('my-name').innerText = me.name;
-            document.getElementById('my-id').innerText = "#" + me.num_id;
+        function tab(t){
+            document.getElementById('tab-h').style.display = t==='h'?'block':'none';
+            document.getElementById('tab-s').style.display = t==='s'?'block':'none';
+            document.getElementById('nh').classList.toggle('on', t==='h');
+            document.getElementById('ns').classList.toggle('on', t==='s');
         }
 
-        function tab(t, el) {
-            document.getElementById('tab-home').style.display = t==='home'?'block':'none';
-            document.getElementById('tab-search').style.display = t==='search'?'block':'none';
-            document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));
-            el.classList.add('active');
-        }
-
-        async function joinChat(r) {
-            currentRoom = r;
-            document.getElementById('chat-view').style.display = 'flex';
-            document.getElementById('msgs').innerHTML = 'Đang tải...';
-            socket.emit('j', r);
+        async function go(r, t){
+            cr = r; document.getElementById('ct').innerText = t;
+            document.getElementById('chat').classList.add('active');
+            document.getElementById('ml').innerHTML = '';
+            socket.emit('join', r);
             const res = await fetch('/api/history/'+r);
             const his = await res.json();
-            document.getElementById('msgs').innerHTML = '';
             his.forEach(render);
         }
 
-        function leaveChat() { document.getElementById('chat-view').style.display = 'none'; }
+        function back(){ document.getElementById('chat').classList.remove('active'); cr=''; }
 
-        function send() {
-            if(!m.value) return;
-            socket.emit('c', { r:currentRoom, s:me.name, m:m.value });
-            m.value = '';
+        function send(){
+            const m = document.getElementById('mi-input').value.trim();
+            if(!m) return;
+            socket.emit('msg', { r:cr, s_id:me.id, s_name:me.name, m });
+            document.getElementById('mi-input').value = '';
         }
 
-        socket.on('m', render);
-        socket.on('t', d => {
-            if(d.u !== me.name) {
-                document.getElementById('typing').innerText = d.u + " đang nhập...";
-                clearTimeout(tT); tT = setTimeout(()=>document.getElementById('typing').innerText='', 2000);
+        socket.on('msg', d => { if(d.r === cr) render(d); });
+
+        function render(d){
+            const isMe = (d.sender_id || d.s_id) === me.id;
+            const dv = document.createElement('div');
+            dv.className = 'bubble ' + (isMe?'me':'other');
+            dv.style.alignSelf = isMe?'flex-end':'flex-start';
+            
+            let content = d.content || d.m;
+            // Nhận diện Link ảnh
+            if(content.match(/\\.(jpeg|jpg|gif|png)$/) != null || content.startsWith('http')){
+               if(content.match(/\\.(jpeg|jpg|gif|png)$/) != null) content = \`<img src="\${content}" class="img-msg" />\`;
+               else content = \`<a href="\${content}" target="_blank" style="color:inherit">\${content}</a>\`;
+            }
+
+            dv.innerHTML = \`<small style="display:block; font-size:10px; opacity:0.5; margin-bottom:3px">\${isMe?'':(d.sender_name||d.s_name)}</small>\` + content;
+            const l = document.getElementById('ml');
+            l.appendChild(dv); l.scrollTop = l.scrollHeight;
+        }
+
+        async function search(){
+            if(sq.value.length < 2) return;
+            const res = await fetch('/api/search?q='+sq.value);
+            const us = await res.json();
+            document.getElementById('sr').innerHTML = us.map(u => \`
+                <div class="item" onclick="goP('\${u.num_id}','\${u.display_name}')">
+                    <div class="avt" style="background:\${u.avatar_color}">\${u.display_name[0]}<div class="dot \${u.is_online?'on':''}"></div></div>
+                    <div><b>\${u.display_name}</b><br><small style="opacity:0.5">#\${u.num_id}</small></div>
+                </div>
+            \`).join('');
+        }
+
+        function goP(id, name){
+            const r = [me.num_id, id].sort().join('_');
+            go(r, name);
+        }
+
+        function isT(){ socket.emit('typing', {r:cr, u:me.name}); }
+        socket.on('typing', d => {
+            if(d.r === cr && d.u !== me.name){
+                document.getElementById('ty').innerText = d.u + " đang nhập...";
+                clearTimeout(window.tyT); window.tyT = setTimeout(()=>document.getElementById('ty').innerText='', 2000);
             }
         });
 
-        function render(d) {
-            const dv = document.createElement('div');
-            const isMe = (d.sender_name || d.s) === me.name;
-            dv.className = 'm ' + (isMe ? 'm-me' : 'm-other');
-            dv.innerHTML = \`<small style="font-size:9px; display:block; opacity:0.6">\${d.sender_name || d.s}</small>\${d.content || d.m}\`;
-            const ms = document.getElementById('msgs');
-            ms.appendChild(dv); ms.scrollTop = ms.scrollHeight;
-        }
-
-        function isTyping() { socket.emit('t', { r:currentRoom, u:me.name }); }
-        function logout() { localStorage.clear(); location.reload(); }
+        document.getElementById('mi-input').addEventListener('keypress', e => { if(e.key==='Enter') send(); });
+        function logout(){ localStorage.clear(); location.reload(); }
     </script>
 </body>
 </html>
     `);
 });
 
-// --- LOGIC REALTIME (SOCKET.IO) ---
-
+// 4. SERVER ENGINE
 io.on('connection', (socket) => {
-    socket.on('j', (r) => socket.join(r));
-
-    socket.on('c', async (data) => {
-        try {
-            // Lưu tin nhắn vào Database để khi F5 không bị mất
-            await pool.query('INSERT INTO messages (room_id, sender_name, content) VALUES ($1, $2, $3)', [data.r, data.s, data.m]);
-            io.to(data.r).emit('m', data);
-        } catch (e) { console.error("Lỗi socket:", e); }
+    socket.on('online', async (uid) => {
+        socket.userId = uid;
+        await pool.query('UPDATE users SET is_online = TRUE WHERE id = $1', [uid]);
     });
 
-    socket.on('t', (data) => {
-        socket.to(data.r).emit('t', data);
+    socket.on('join', (r) => socket.join(r));
+
+    socket.on('msg', async (d) => {
+        try {
+            await pool.query('INSERT INTO messages (room_id, sender_id, sender_name, content) VALUES ($1, $2, $3, $4)', [d.r, d.s_id, d.s_name, d.m]);
+            io.to(d.r).emit('msg', d);
+        } catch (e) { console.error(e); }
+    });
+
+    socket.on('typing', (d) => socket.to(d.r).emit('typing', d));
+
+    socket.on('disconnect', async () => {
+        if (socket.userId) {
+            await pool.query('UPDATE users SET is_online = FALSE, last_seen = NOW() WHERE id = $1', [socket.userId]);
+        }
     });
 });
 
-server.listen(PORT, () => console.log('Server đã sẵn sàng tại port ' + PORT));
+server.listen(PORT, () => console.log('🚀 Z-Chat V7 Infinity Online on port ' + PORT));
