@@ -1,144 +1,291 @@
 const express = require('express');
-const { Pool } = require('pg');
-const bcrypt = require('bcrypt');
-const jwt = require('jsonwebtoken');
 const http = require('http');
 const { Server } = require('socket.io');
+const bcrypt = require('bcrypt');
+const jwt = require('jsonwebtoken');
+const { Pool } = require('pg');
 
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server);
 
-// Cấu hình Database (Nhập DATABASE_URL từ Render vào Biến môi trường)
+const JWT_SECRET = 'Z_CHAT_SUPER_SECRET_TOKEN';
+const PORT = process.env.PORT || 3000;
+
+// 1. KẾT NỐI DATABASE (Sử dụng DATABASE_URL từ server deploy)
 const pool = new Pool({
-    connectionString: process.env.DATABASE_URL,
-    ssl: { rejectUnauthorized: false }
+    connectionString: process.env.DATABASE_URL || 'postgresql://postgres:password@localhost:5432/zchat',
+    ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false // Hỗ trợ SSL cho Render/Heroku
 });
 
-const JWT_SECRET = process.env.JWT_SECRET || 'secret-key-2-hours';
-
-app.use(express.json());
-app.use(express.static('public'));
-
-// --- KHỞI TẠO DATABASE ---
+// Tự động tạo bảng nếu chưa có (Tránh lỗi Runtime)
 const initDB = async () => {
-    await pool.query(`
-        CREATE TABLE IF NOT EXISTS users (
-            id SERIAL PRIMARY KEY,
-            numeric_id INT UNIQUE DEFAULT floor(random() * 900000 + 100000),
-            username VARCHAR(50) UNIQUE NOT NULL,
-            display_name VARCHAR(100),
-            password VARCHAR(255) NOT NULL,
-            last_active TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-        CREATE TABLE IF NOT EXISTS groups (
-            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-            name VARCHAR(100) NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS group_members (
-            group_id UUID REFERENCES groups(id) ON DELETE CASCADE,
-            user_id INT REFERENCES users(id) ON DELETE CASCADE,
-            role VARCHAR(20) DEFAULT 'member', -- owner, admin, manager, member
-            PRIMARY KEY (group_id, user_id)
-        );
-    `);
+    try {
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS users (
+                id SERIAL PRIMARY KEY,
+                username TEXT UNIQUE NOT NULL,
+                display_name TEXT,
+                password TEXT NOT NULL,
+                num_id TEXT UNIQUE
+            );
+            CREATE TABLE IF NOT EXISTS messages (
+                id SERIAL PRIMARY KEY,
+                room_id TEXT,
+                sender_name TEXT,
+                content TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        `);
+        console.log("Database đã sẵn sàng.");
+    } catch (err) {
+        console.error("Lỗi khởi tạo DB:", err);
+    }
 };
 initDB();
 
-// --- MIDDLEWARE XÁC THỰC (SESSION 2 TIẾNG) ---
-const verifyToken = (req, res, next) => {
-    const token = req.headers['authorization'];
-    if (!token) return res.status(403).json({ error: "Chưa đăng nhập!" });
-    try {
-        req.user = jwt.verify(token.split(' ')[1], JWT_SECRET);
-        next();
-    } catch (err) {
-        res.status(401).json({ error: "Phiên đăng nhập hết hạn. Vui lòng đăng nhập lại!" });
-    }
-};
+app.use(express.json());
 
-// --- API AUTH ---
+// --- API HỆ THỐNG ---
+
 app.post('/api/register', async (req, res) => {
-    const { username, password, displayName } = req.body;
-    if (!/^\d+$/.test(password) || password.length < 8 || password.length > 15) {
-        return res.status(400).json({ error: "Mật khẩu phải từ 8-15 số." });
-    }
+    const { username, display_name, password } = req.body;
     try {
-        const hash = await bcrypt.hash(password, 10);
-        await pool.query('INSERT INTO users (username, password, display_name) VALUES ($1, $2, $3)', 
-            [username, hash, displayName || username]);
+        const hashed = await bcrypt.hash(password, 10);
+        const numId = Math.floor(100000 + Math.random() * 900000).toString();
+        await pool.query(
+            'INSERT INTO users (username, display_name, password, num_id) VALUES ($1, $2, $3, $4)',
+            [username, display_name, hashed, numId]
+        );
         res.json({ success: true });
-    } catch (e) { res.status(400).json({ error: "ID đã tồn tại!" }); }
+    } catch (e) { res.status(500).json({ error: "Lỗi! Tên đăng nhập có thể đã tồn tại." }); }
 });
 
 app.post('/api/login', async (req, res) => {
     const { username, password } = req.body;
-    const result = await pool.query('SELECT * FROM users WHERE username = $1', [username]);
-    if (result.rows.length > 0 && await bcrypt.compare(password, result.rows[0].password)) {
-        const user = result.rows[0];
-        // Cấp JWT Token hạn 2 tiếng
-        const token = jwt.sign({ id: user.id, username: user.username, num_id: user.numeric_id }, JWT_SECRET, { expiresIn: '2h' });
-        res.json({ success: true, token, user: { numId: user.numeric_id, name: user.display_name } });
-    } else res.status(401).json({ error: "Sai thông tin!" });
-});
-
-// --- API TÍNH NĂNG ---
-app.get('/api/search', verifyToken, async (req, res) => {
-    const { q } = req.query;
-    // Tìm theo numeric_id hoặc username
-    const result = await pool.query(
-        'SELECT id, numeric_id, username, display_name FROM users WHERE username ILIKE $1 OR numeric_id::text = $1 LIMIT 10', 
-        [`%${q}%`]
-    );
-    res.json(result.rows);
-});
-
-app.post('/api/update-profile', verifyToken, async (req, res) => {
-    const { newName, newPassword } = req.body;
-    if(newName) await pool.query('UPDATE users SET display_name = $1 WHERE id = $2', [newName, req.user.id]);
-    if(newPassword) {
-        const hash = await bcrypt.hash(newPassword, 10);
-        await pool.query('UPDATE users SET password = $1 WHERE id = $2', [hash, req.user.id]);
-    }
-    res.json({ success: true });
-});
-
-app.post('/api/create-group', verifyToken, async (req, res) => {
-    const { groupName } = req.body;
-    const groupRes = await pool.query('INSERT INTO groups (name) VALUES ($1) RETURNING id', [groupName]);
-    const groupId = groupRes.rows[0].id;
-    // Set người tạo làm Owner
-    await pool.query('INSERT INTO group_members (group_id, user_id, role) VALUES ($1, $2, $3)', [groupId, req.user.id, 'owner']);
-    res.json({ success: true, groupId });
-});
-
-// Chuyển hướng chat ngẫu nhiên
-app.post('/api/get-chat-link', verifyToken, (req, res) => {
-    const randomRoom = 'room_' + Math.random().toString(36).substr(2, 9);
-    res.json({ link: `/chat.html?room=${randomRoom}&target=${req.body.targetId}&type=${req.body.type}` });
-});
-
-// --- SOCKET.IO REALTIME ---
-// Middleware Socket kiểm tra JWT
-io.use((socket, next) => {
-    const token = socket.handshake.auth.token;
-    if (!token) return next(new Error("Authentication error"));
     try {
-        socket.user = jwt.verify(token, JWT_SECRET);
-        next();
-    } catch (err) { next(new Error("Token expired")); }
+        const result = await pool.query('SELECT * FROM users WHERE username = $1', [username]);
+        const user = result.rows[0];
+        if (user && await bcrypt.compare(password, user.password)) {
+            const token = jwt.sign({ id: user.id }, JWT_SECRET);
+            res.json({ success: true, token, user: { name: user.display_name, num_id: user.num_id } });
+        } else res.status(401).json({ error: "Sai tài khoản hoặc mật khẩu!" });
+    } catch (e) { res.status(500).json({ error: "Lỗi Server" }); }
 });
+
+app.get('/api/history/:room', async (req, res) => {
+    const history = await pool.query('SELECT * FROM messages WHERE room_id = $1 ORDER BY created_at ASC LIMIT 50', [req.params.room]);
+    res.json(history.rows);
+});
+
+// --- PHẦN GIAO DIỆN (HTML/CSS/JS GỘP) ---
+
+app.get('/', (req, res) => {
+    res.send(`
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+    <title>Z-Chat Ultra</title>
+    <script src="/socket.io/socket.io.js"></script>
+    <style>
+        :root { --primary: #00d2ff; --bg: #0a0a12; --glass: rgba(255, 255, 255, 0.05); }
+        * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Segoe UI', sans-serif; }
+        body { background: var(--bg); color: white; height: 100vh; overflow: hidden; }
+        
+        .btn { background: var(--primary); color: #000; border: none; padding: 12px; border-radius: 10px; font-weight: bold; cursor: pointer; transition: 0.3s; }
+        .btn:active { transform: scale(0.95); }
+        input { background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.2); color: white; padding: 12px; border-radius: 10px; outline: none; margin-bottom: 15px; width: 100%; }
+        input:focus { border-color: var(--primary); }
+
+        /* Auth */
+        #auth-screen { display: flex; align-items: center; justify-content: center; height: 100vh; padding: 20px; }
+        .card { background: var(--glass); backdrop-filter: blur(20px); padding: 30px; border-radius: 25px; width: 100%; max-width: 400px; border: 1px solid rgba(255,255,255,0.1); text-align: center; }
+
+        /* App */
+        #app-screen { display: none; flex-direction: column; height: 100vh; }
+        .header { height: 60px; padding: 0 20px; display: flex; align-items: center; justify-content: space-between; background: rgba(255,255,255,0.03); border-bottom: 1px solid rgba(255,255,255,0.1); }
+        .main-view { flex: 1; overflow-y: auto; padding: 20px; }
+
+        /* Chat Room */
+        #chat-view { display: none; position: fixed; inset: 0; background: var(--bg); flex-direction: column; z-index: 1000; }
+        .msgs { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 12px; }
+        .m { max-width: 80%; padding: 10px 15px; border-radius: 15px; font-size: 15px; line-height: 1.4; }
+        .m-me { align-self: flex-end; background: var(--primary); color: #000; border-bottom-right-radius: 2px; }
+        .m-other { align-self: flex-start; background: rgba(255,255,255,0.1); border-bottom-left-radius: 2px; }
+
+        .input-bar { padding: 15px; display: flex; gap: 10px; background: #161625; padding-bottom: calc(15px + env(safe-area-inset-bottom)); }
+        .input-bar input { margin: 0; }
+
+        /* Navigation */
+        .bottom-nav { height: 70px; display: flex; background: #000; border-top: 1px solid #333; padding-bottom: env(safe-area-inset-bottom); }
+        .nav-item { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; font-size: 11px; opacity: 0.5; cursor: pointer; }
+        .nav-item.active { opacity: 1; color: var(--primary); }
+    </style>
+</head>
+<body>
+    <div id="auth-screen">
+        <div class="card" id="login-box">
+            <h1 style="color:var(--primary); margin-bottom:10px">Z-Chat</h1>
+            <p style="opacity:0.6; margin-bottom:20px">Đăng nhập để kết nối</p>
+            <input type="text" id="u" placeholder="Tên đăng nhập">
+            <input type="password" id="p" placeholder="Mật khẩu">
+            <button class="btn" style="width:100%" onclick="auth('login')">Đăng Nhập</button>
+            <p style="margin-top:20px; font-size:13px" onclick="toggleAuth(true)">Chưa có tài khoản? Đăng ký ngay</p>
+        </div>
+        <div class="card" id="reg-box" style="display:none">
+            <h2>Tạo tài khoản</h2><br>
+            <input type="text" id="ru" placeholder="Username">
+            <input type="text" id="rn" placeholder="Tên hiển thị">
+            <input type="password" id="rp" placeholder="Mật khẩu">
+            <button class="btn" style="width:100%" onclick="auth('reg')">Xác Nhận</button>
+            <p style="margin-top:20px; font-size:13px" onclick="toggleAuth(false)">Quay lại Đăng nhập</p>
+        </div>
+    </div>
+
+    <div id="app-screen">
+        <div class="header">
+            <span id="my-name" style="font-weight:bold">Z-Chat</span>
+            <span id="my-id" style="color:var(--primary); font-size:12px; border:1px solid; padding:2px 8px; border-radius:10px"></span>
+        </div>
+        <div class="main-view" id="main-view">
+            <div id="tab-home">
+                <div class="card" style="width:100%; text-align:left; padding:20px; margin-bottom:15px" onclick="joinChat('global')">
+                    <h3 style="color:var(--primary)">🌍 Phòng Toàn Cầu</h3>
+                    <p style="font-size:12px; opacity:0.6">Nơi mọi người trò chuyện tự do</p>
+                </div>
+            </div>
+            <div id="tab-search" style="display:none">
+                <input type="text" id="s-input" placeholder="Tìm ID số hoặc tên...">
+                <div id="s-results"></div>
+            </div>
+        </div>
+        <div class="bottom-nav">
+            <div class="nav-item active" onclick="tab('home',this)">🏠<br>Trang chủ</div>
+            <div class="nav-item" onclick="tab('search',this)">🔍<br>Tìm kiếm</div>
+            <div class="nav-item" onclick="logout()">🚪<br>Thoát</div>
+        </div>
+    </div>
+
+    <div id="chat-view">
+        <div class="header">
+            <button onclick="leaveChat()" style="background:none; border:none; color:white; font-size:22px">←</button>
+            <span id="room-name">Phòng Chat</span>
+            <div style="width:30px"></div>
+        </div>
+        <div class="msgs" id="msgs"></div>
+        <div id="typing" style="padding:5px 20px; font-size:11px; color:var(--primary); height:20px"></div>
+        <div class="input-bar">
+            <input type="text" id="m" placeholder="Nhập tin nhắn..." oninput="isTyping()">
+            <button class="btn" onclick="send()">Gửi</button>
+        </div>
+    </div>
+
+    <script>
+        const socket = io();
+        let me = JSON.parse(localStorage.getItem('z_user'));
+        let currentRoom = '';
+        let tT;
+
+        if(me) showApp();
+
+        function toggleAuth(reg) {
+            document.getElementById('login-box').style.display = reg ? 'none' : 'block';
+            document.getElementById('reg-box').style.display = reg ? 'block' : 'none';
+        }
+
+        async function auth(type) {
+            const isL = type==='login';
+            const body = isL ? {username:u.value, password:p.value} : {username:ru.value, display_name:rn.value, password:rp.value};
+            const res = await fetch('/api/'+(isL?'login':'register'), {
+                method:'POST', headers:{'Content-Type':'application/json'},
+                body: JSON.stringify(body)
+            });
+            const data = await res.json();
+            if(data.success) {
+                if(isL) {
+                    localStorage.setItem('z_user', JSON.stringify(data.user));
+                    me = data.user;
+                    showApp();
+                } else { alert("Đã đăng ký! Mời đăng nhập"); toggleAuth(false); }
+            } else alert(data.error);
+        }
+
+        function showApp() {
+            document.getElementById('auth-screen').style.display = 'none';
+            document.getElementById('app-screen').style.display = 'flex';
+            document.getElementById('my-name').innerText = me.name;
+            document.getElementById('my-id').innerText = "#" + me.num_id;
+        }
+
+        function tab(t, el) {
+            document.getElementById('tab-home').style.display = t==='home'?'block':'none';
+            document.getElementById('tab-search').style.display = t==='search'?'block':'none';
+            document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));
+            el.classList.add('active');
+        }
+
+        async function joinChat(r) {
+            currentRoom = r;
+            document.getElementById('chat-view').style.display = 'flex';
+            document.getElementById('msgs').innerHTML = 'Đang tải...';
+            socket.emit('j', r);
+            const res = await fetch('/api/history/'+r);
+            const his = await res.json();
+            document.getElementById('msgs').innerHTML = '';
+            his.forEach(render);
+        }
+
+        function leaveChat() { document.getElementById('chat-view').style.display = 'none'; }
+
+        function send() {
+            if(!m.value) return;
+            socket.emit('c', { r:currentRoom, s:me.name, m:m.value });
+            m.value = '';
+        }
+
+        socket.on('m', render);
+        socket.on('t', d => {
+            if(d.u !== me.name) {
+                document.getElementById('typing').innerText = d.u + " đang nhập...";
+                clearTimeout(tT); tT = setTimeout(()=>document.getElementById('typing').innerText='', 2000);
+            }
+        });
+
+        function render(d) {
+            const dv = document.createElement('div');
+            const isMe = (d.sender_name || d.s) === me.name;
+            dv.className = 'm ' + (isMe ? 'm-me' : 'm-other');
+            dv.innerHTML = \`<small style="font-size:9px; display:block; opacity:0.6">\${d.sender_name || d.s}</small>\${d.content || d.m}\`;
+            const ms = document.getElementById('msgs');
+            ms.appendChild(dv); ms.scrollTop = ms.scrollHeight;
+        }
+
+        function isTyping() { socket.emit('t', { r:currentRoom, u:me.name }); }
+        function logout() { localStorage.clear(); location.reload(); }
+    </script>
+</body>
+</html>
+    `);
+});
+
+// --- LOGIC REALTIME (SOCKET.IO) ---
 
 io.on('connection', (socket) => {
-    socket.on('join_room', (roomId) => { socket.join(roomId); });
-    socket.on('send_message', (data) => {
-        // Broadcast tin nhắn vào phòng
-        io.to(data.room).emit('receive_message', {
-            senderId: socket.user.num_id,
-            senderName: socket.user.username,
-            text: data.text
-        });
+    socket.on('j', (r) => socket.join(r));
+
+    socket.on('c', async (data) => {
+        try {
+            // Lưu tin nhắn vào Database để khi F5 không bị mất
+            await pool.query('INSERT INTO messages (room_id, sender_name, content) VALUES ($1, $2, $3)', [data.r, data.s, data.m]);
+            io.to(data.r).emit('m', data);
+        } catch (e) { console.error("Lỗi socket:", e); }
+    });
+
+    socket.on('t', (data) => {
+        socket.to(data.r).emit('t', data);
     });
 });
 
-server.listen(process.env.PORT || 3000, () => console.log("Server running..."));
+server.listen(PORT, () => console.log('Server đã sẵn sàng tại port ' + PORT));
